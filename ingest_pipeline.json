@@ -1,0 +1,12 @@
+{
+  "description": "Enriches every log with sentinel_group_id for reliable dashboard reconstruction.",
+  "processors": [
+    {
+      "script": {
+        "lang": "painless",
+        "description": "Builds sentinel_group_id from network 5-tuple + 1-minute time slice. Skips if already set.",
+        "source": "if (ctx.containsKey('sentinel_group_id') && ctx['sentinel_group_id'] != null && ctx['sentinel_group_id'] != '') { return; } String src = ctx.containsKey('src_ip') ? ctx['src_ip'] : (ctx.containsKey('source.ip') ? ctx['source.ip'] : ''); String dst = ctx.containsKey('dst_ip') ? ctx['dst_ip'] : (ctx.containsKey('destination.ip') ? ctx['destination.ip'] : ''); String port = ctx.containsKey('dst_port') ? String.valueOf(ctx['dst_port']) : (ctx.containsKey('destination.port') ? String.valueOf(ctx['destination.port']) : ''); String proto = ctx.containsKey('Protocol Type') ? ctx['Protocol Type'] : (ctx.containsKey('protocol') ? ctx['protocol'] : ''); String ts = ctx.containsKey('@timestamp') ? ctx['@timestamp'] : ''; String ts_min = (ts.length() >= 16) ? ts.substring(0, 16) : ts; if (src != '' && dst != '') { ctx['sentinel_group_id'] = src + '_' + dst + '_' + port + '_' + proto + '_' + ts_min; } else if (proto != '') { String rate = ctx.containsKey('Rate') ? String.valueOf(ctx['Rate']) : '0'; ctx['sentinel_group_id'] = 'flow_' + proto + '_' + rate + '_' + ts_min; } else { String existing = ctx.containsKey('process_tree_id') ? ctx['process_tree_id'] : (ctx.containsKey('session_id') ? ctx['session_id'] : (ctx.containsKey('logon_id') ? ctx['logon_id'] : 'default')); ctx['sentinel_group_id'] = existing + '_' + ts_min; }"
+      }
+    }
+  ]
+}

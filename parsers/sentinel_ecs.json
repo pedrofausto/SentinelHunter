@@ -1,0 +1,175 @@
+{
+  "name": "SentinelHunter ECS (Flat)",
+  "priority": 20,
+  "match_rule": {
+    "field": ["event.action", "EventID"],
+    "value": [
+      "process_create", "process_created",
+      "process_access",
+      "network_connect", "network_connection",
+      "file_write", "file_created", "file_create",
+      "registry_set", "dns_query",
+      "1", "3", "4688", "10", "11", "22"
+    ]
+  },
+  "require_layer4": true,
+  "group_by": [
+    "process_tree_id",
+    "session_id",
+    "sentinel_group_id",
+    "process.entity_id",
+    "process.parent.entity_id",
+    "src_ip"
+  ],
+  "timestamp": ["@timestamp", "timestamp"],
+  "event_id_field": ["EventID", "event.code"],
+  "events": {
+    "1": {
+      "action": "process_created",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": ["process.parent.entity_id", "process.parent.name", "process.parent.executable"],
+          "attributes": {
+            "pid": "process.parent.pid",
+            "image_name": "process.parent.name"
+          }
+        },
+        {
+          "type": "process",
+          "id_field": ["process.entity_id", "process.name", "process.executable", "Image"],
+          "attributes": {
+            "pid": "process.pid",
+            "parent_pid": "process.parent.pid",
+            "parent_entity_id": "process.parent.entity_id",
+            "user": "user.name",
+            "command_line": "CommandLine",
+            "integrity": "IntegrityLevel"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": ["process.parent.entity_id", "process.parent.name", "process.parent.executable"],
+          "to": ["process.entity_id", "process.name", "process.executable", "Image"],
+          "action": "process_created"
+        }
+      ]
+    },
+    "4688": {
+      "action": "process_created",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": ["process.parent.entity_id", "process.parent.name"],
+          "attributes": {
+            "image_name": "process.parent.name"
+          }
+        },
+        {
+          "type": "process",
+          "id_field": ["process.entity_id", "process.name", "Image"],
+          "attributes": {
+            "pid": "process.pid",
+            "parent_entity_id": "process.parent.entity_id",
+            "user": "user.name",
+            "command_line": "CommandLine"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": ["process.parent.entity_id", "process.parent.name"],
+          "to": ["process.entity_id", "process.name", "Image"],
+          "action": "process_created"
+        }
+      ]
+    },
+    "3": {
+      "action": "network_connect",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": ["process.entity_id", "process.name", "Image"],
+          "attributes": {
+            "user": "user.name"
+          }
+        },
+        {
+          "type": "ip",
+          "id_field": ["dst_ip", "destination.ip"],
+          "attributes": {
+            "ip": ["dst_ip", "destination.ip"],
+            "port": ["dst_port", "destination.port"],
+            "bytes_sent": "bytes_sent",
+            "bytes_received": "bytes_received"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": ["process.entity_id", "process.name", "Image"],
+          "to": ["dst_ip", "destination.ip"],
+          "action": "network_connect",
+          "attributes": {
+            "port": ["dst_port", "destination.port"],
+            "protocol": ["protocol", "network.protocol"],
+            "src_ip": ["src_ip", "source.ip"]
+          }
+        }
+      ]
+    },
+    "10": {
+      "action": "process_access",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": ["process.entity_id", "process.name", "Image"],
+          "attributes": {
+            "pid": "process.pid",
+            "user": "user.name"
+          }
+        },
+        {
+          "type": "process",
+          "id_field": ["target.process.entity_id", "target.process.name"],
+          "attributes": {}
+        }
+      ],
+      "edges": [
+        {
+          "from": ["process.entity_id", "process.name", "Image"],
+          "to": ["target.process.entity_id", "target.process.name"],
+          "action": "process_access"
+        }
+      ]
+    },
+    "11": {
+      "action": "file_write",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": ["process.entity_id", "process.name", "Image"],
+          "attributes": {
+            "pid": "process.pid",
+            "user": "user.name"
+          }
+        },
+        {
+          "type": "file",
+          "id_field": ["TargetFilename", "file.path"],
+          "attributes": {
+            "path": ["TargetFilename", "file.path"]
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": ["process.entity_id", "process.name", "Image"],
+          "to": ["TargetFilename", "file.path"],
+          "action": "file_write"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "name": "Agnostic Network Firewall",
+  "priority": 30,
+  "match_rule": {
+    "field": ["event.category", "decoder.name", "rule.groups"],
+    "value": ["network", "iptables", "firewall", "pfsense", "fortigate"]
+  },
+  "group_by": [
+    "session_id",
+    "connection.id",
+    "network.community_id",
+    "data.dstip",
+    "destination.ip",
+    "server.ip",
+    "dst_ip",
+    "data.srcip",
+    "source.ip",
+    "client.ip",
+    "src_ip"
+  ],
+  "timestamp": ["@timestamp", "timestamp"],
+  "event_id_field": "",
+  "events": {
+    "": {
+      "action": "network_flow",
+      "nodes": [
+        {
+          "type": "ip",
+          "id_field": ["data.srcip", "source.ip", "client.ip", "src_ip"],
+          "attributes": {
+            "ip": ["data.srcip", "source.ip", "client.ip", "src_ip"],
+            "port": ["data.srcport", "source.port", "client.port", "src_port"],
+            "mac": ["data.mac", "source.mac", "client.mac"]
+          }
+        },
+        {
+          "type": "ip",
+          "id_field": ["data.dstip", "destination.ip", "server.ip", "dst_ip"],
+          "attributes": {
+            "ip": ["data.dstip", "destination.ip", "server.ip", "dst_ip"],
+            "port": ["data.dstport", "destination.port", "server.port", "dst_port"]
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": ["data.srcip", "source.ip", "client.ip", "src_ip"],
+          "to": ["data.dstip", "destination.ip", "server.ip", "dst_ip"],
+          "action": "network_flow",
+          "attributes": {
+            "port": ["data.dstport", "destination.port", "server.port", "dst_port"],
+            "protocol": ["data.protocol", "network.protocol", "protocol"],
+            "fw_action": ["data.action", "event.action", "action"],
+            "fw_rule": ["data.rule", "rule.id"]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,2 +1,42 @@
+# ======= Secrets & Credentials =======
+.env
+*.pem
+*.key
+.sentinel_state.json
+
+# ======= AI & Assistant Tooling =======
+.claude/
+.agency/
+.moai/
+.mcp.json
+
+# ======= Debug & Test Artifacts (Root Level) =======
+# One-off scripts used for manual verification
+debug_*.py
+test_*.py
+diag_*.py
+trace_*.py
+recover.py
+evaluate_csv.py
+Calibration_results.txt
+attack_test.jsonl
+graph.html
+*.log
+
+# ======= Python Environment =======
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+env/
+# Windows specific
+Desktop.ini
+Thumbs.db
+
+# ======= Project Data & Models =======
+# Large ML weights and local log samples
+models/
+samples/
+/tmp/

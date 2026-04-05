@@ -1,105 +1,112 @@
+import os
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import RGCNConv, global_mean_pool
-from torch_geometric.data import Data, Batch
+from torch_geometric.nn import RGATConv, global_mean_pool, global_max_pool
 import networkx as nx
 from typing import List, Dict, Any, Tuple
 import logging
+import threading
+
+from torch_geometric.data import Data, Batch
 
 logger = logging.getLogger(__name__)
 
-class RGCNEncoder(torch.nn.Module):
+class RGATEncoder(torch.nn.Module):
     """
-    Relational Graph Convolutional Network (RGCN) implemented with PyTorch Geometric.
-    Focuses on processing the Provenance Graph based strictly on relationships
-    and edge types, avoiding fragile textual attributes (like IPs or file names).
+    Relational Graph Attention Network (RGAT).
+    Uses multi-head attention to learn which node relationships are most 
+    critical for identifying malicious intent.
     """
     def __init__(self, in_channels: int, hidden_channels: int, out_channels: int, num_relations: int):
         super().__init__()
-        # RGCN Convolution layers to learn node representations considering relation types
-        self.conv1 = RGCNConv(in_channels, hidden_channels, num_relations)
-        self.conv2 = RGCNConv(hidden_channels, hidden_channels, num_relations)
-
-        # We output a subgraph embedding by pooling the learned node features
-        # and feeding them into an MLP.
-        self.lin = torch.nn.Linear(hidden_channels, out_channels)
+        # Layer 1: Relational Attention
+        self.conv1 = RGATConv(in_channels, hidden_channels, num_relations, heads=4, concat=True)
+        # Layer 2: Relational Attention with Residual
+        self.conv2 = RGATConv(hidden_channels * 4, hidden_channels, num_relations, heads=4, concat=False)
+        
+        # Linear layers for pooling and final embedding
+        self.lin1 = torch.nn.Linear(hidden_channels, hidden_channels)
+        self.lin2 = torch.nn.Linear(hidden_channels, out_channels)
 
     def forward(self, x, edge_index, edge_type, batch):
-        # x: Node features [num_nodes, in_channels]
-        # edge_index: Graph connectivity [2, num_edges]
-        # edge_type: Edge relation types [num_edges]
-        # batch: Batch vector [num_nodes]
+        # Initial convolution
+        x1 = self.conv1(x, edge_index, edge_type)
+        x1 = F.elu(x1)
+        x1 = F.dropout(x1, p=0.2, training=self.training)
 
-        # First GNN layer
-        x = self.conv1(x, edge_index, edge_type)
-        x = F.relu(x)
-        x = F.dropout(x, p=0.2, training=self.training)
+        # Second convolution with Attention
+        x2 = self.conv2(x1, edge_index, edge_type)
+        x2 = F.elu(x2)
 
-        # Second GNN layer
-        x = self.conv2(x, edge_index, edge_type)
-        x = F.relu(x)
+        # Pooling: Combine Mean and Max pooling to capture both "average" behavior 
+        # and "extreme" (bursty) events in the graph.
+        x_mean = global_mean_pool(x2, batch)
+        x_max = global_max_pool(x2, batch)
+        x_pool = x_mean + x_max
 
-        # Pooling to obtain a subgraph representation vector (dense embedding)
-        # We aggregate all node features in each graph into a single vector
-        x = global_mean_pool(x, batch)
-
-        # Final linear layer to produce the embedding
-        x = self.lin(x)
-        return x
+        # Final MLP
+        x_out = F.relu(self.lin1(x_pool))
+        x_out = self.lin2(x_out)
+        return x_out
 
 class TopologicalGraphEncoder:
     """
-    Module responsible for converting NetworkX Directed Provenance Graphs
-    into PyTorch Geometric Data objects and producing dense embeddings using RGCN.
+    Advanced encoder that transforms NetworkX provenance graphs into dense embeddings
+    using Relational Graph Attention. Focuses on structural importance (centrality, degree).
     """
     def __init__(self, hidden_channels: int = 64, out_channels: int = 32):
         self.hidden_channels = hidden_channels
         self.out_channels = out_channels
 
-        # Mappings to translate categorical data to numeric representations (topological focus)
-        # One-hot encoding for node types (Process, File, IP)
+        # Node type mapping (consistent with graph_builder)
         self.node_type_mapping = {'process': 0, 'file': 1, 'ip': 2, 'unknown': 3}
-        self.num_node_features = len(self.node_type_mapping) + 2 # +2 for in-degree, out-degree
+        
+        # Features: [Type One-Hot(4)] + [In-Deg, Out-Deg, Centrality, Is-Root]
+        self.num_node_features = len(self.node_type_mapping) + 4
 
-        # We will learn the edge types dynamically as we see them, or use a predefined set
         self.edge_type_mapping = {}
         self.num_relations = 0
+        self.max_relations = 0  # Fixed capacity of the current model
 
-        self.model = None # Initialized after relation types are gathered
+        self.model = None
+        self._lock = threading.Lock()
+        # Tracks unknown edge types already warned about to avoid log flooding
+        self._warned_edge_types: set = set()
 
     def _create_node_features(self, G: nx.DiGraph, node) -> torch.Tensor:
         """
-        Creates mathematical/topological features for a node:
-        [One-hot Type, In-Degree, Out-Degree]
-        This ignores fragile IoC strings.
+        Consumes pre-calculated topological features from the NetworkX node.
+        Includes Node Type (One-hot) and the 4 topological metrics.
         """
+        # 1. Node Type (as index)
         n_type_str = G.nodes[node].get('type', 'unknown').lower()
         n_type_idx = self.node_type_mapping.get(n_type_str, self.node_type_mapping['unknown'])
 
-        # One-hot vector for node type
-        feat = [0.0] * len(self.node_type_mapping)
-        feat[n_type_idx] = 1.0
+        # 2. One-hot the type
+        type_onehot = [0.0] * len(self.node_type_mapping)
+        type_onehot[n_type_idx] = 1.0
 
-        # Topological metrics
-        feat.append(float(G.in_degree(node)))
-        feat.append(float(G.out_degree(node)))
+        # 3. Fetch pre-calculated topological metrics [In-Deg, Out-Deg, Centrality, Is-Root]
+        # Fallback to zeros if they don't exist for some reason
+        topo_feats = G.nodes[node].get('features', [0.0]*5)
+        
+        # The node's stored 'features' already includes the type index as the first element.
+        # We replace it with our dynamic one-hot vector for better neural representation.
+        final_feat = type_onehot + topo_feats[1:]
 
-        return torch.tensor(feat, dtype=torch.float)
+        return torch.tensor(final_feat, dtype=torch.float)
 
     def _convert_nx_to_pyg(self, G: nx.DiGraph, is_training: bool = False) -> Data:
         """
-        Converts a NetworkX DiGraph to a PyTorch Geometric Data object.
+        Converts NX graph to PyG Data using pre-calculated features.
         """
-        # Node mapping: string name -> integer index
         node_mapping = {node: i for i, node in enumerate(G.nodes())}
 
-        # Prepare node features
-        x_list = []
-        for node in G.nodes():
-            x_list.append(self._create_node_features(G, node))
+        # Node features - Now much faster as it avoids redundant centrality calculation
+        x_list = [self._create_node_features(G, node) for node in G.nodes()]
         x = torch.stack(x_list)
 
-        # Prepare edge indices and types
+        # Edge indices and types
         edge_indices = [[], []]
         edge_types = []
 
@@ -107,63 +114,94 @@ class TopologicalGraphEncoder:
             edge_indices[0].append(node_mapping[u])
             edge_indices[1].append(node_mapping[v])
 
-            # Handle edge types
             action = data.get('action', 'unknown').lower()
-            if is_training and action not in self.edge_type_mapping:
-                self.edge_type_mapping[action] = self.num_relations
-                self.num_relations += 1
+            with self._lock:
+                if is_training and action not in self.edge_type_mapping:
+                    self.edge_type_mapping[action] = self.num_relations
+                    self.num_relations += 1
+                e_type = self.edge_type_mapping.get(action, 0)
+                
+                # Cap edge_type to the model's capacity to avoid IndexError.
+                # Log a warning once per unknown type so operators know retraining may help.
+                if self.max_relations > 0 and e_type >= self.max_relations:
+                    if action not in self._warned_edge_types:
+                        logger.warning(
+                            f"[GNN] Unknown edge type '{action}' (index {e_type}) exceeds model "
+                            f"capacity ({self.max_relations} relations). Mapping to relation 0. "
+                            "Retraining is recommended if this type appears frequently."
+                        )
+                        self._warned_edge_types.add(action)
+                    e_type = 0
 
-            e_type = self.edge_type_mapping.get(action, 0) # default to 0 if unseen
             edge_types.append(e_type)
 
-        edge_index = torch.tensor(edge_indices, dtype=torch.long)
-        edge_type = torch.tensor(edge_types, dtype=torch.long)
-
-        # Return PyG Data object
-        return Data(x=x, edge_index=edge_index, edge_type=edge_type, graph_id=G.graph.get('graph_id', 'unknown'))
+        return Data(
+            x=x, 
+            edge_index=torch.tensor(edge_indices, dtype=torch.long),
+            edge_type=torch.tensor(edge_types, dtype=torch.long),
+            graph_id=G.graph.get('graph_id', 'unknown')
+        )
 
     def prepare_data(self, graphs: List[nx.DiGraph], is_training: bool = False) -> List[Data]:
         """
         Converts a list of NetworkX graphs into PyG Data objects.
-        During training, it builds the mapping of relations.
+        During training, it builds the mapping of relations and initializes the model.
         """
         pyg_graphs = []
         for G in graphs:
-            if G.number_of_nodes() > 0:
+            # Require at least 2 nodes. Graphs with edges=0 are still encoded — the
+            # GNN conv layers simply do no message passing and pool only node features,
+            # which is still meaningful for isolated-spawn or file-only anomalies.
+            if G.number_of_nodes() >= 2:
                 data = self._convert_nx_to_pyg(G, is_training)
                 pyg_graphs.append(data)
 
-        if is_training and self.model is None:
-            # Initialize model now that we know num_relations
-            # Ensure at least 1 relation to avoid errors in RGCNConv
-            num_rels = max(1, self.num_relations)
-            self.model = RGCNEncoder(
-                in_channels=self.num_node_features,
-                hidden_channels=self.hidden_channels,
-                out_channels=self.out_channels,
-                num_relations=num_rels
-            )
-            logger.info(f"Initialized RGCNEncoder with {self.num_node_features} node features and {num_rels} relations.")
+        if is_training:
+            with self._lock:
+                if self.model is None:
+                    # Initialize model now that we know num_relations
+                    # Ensure at least 1 relation to avoid errors in RGATConv
+                    self.max_relations = max(1, self.num_relations)
+                    self.model = RGATEncoder(
+                        in_channels=self.num_node_features,
+                        hidden_channels=self.hidden_channels,
+                        out_channels=self.out_channels,
+                        num_relations=self.max_relations
+                    )
+                    logger.info(f"Initialized RGATEncoder with {self.num_node_features} node features and {self.max_relations} relations.")
 
         return pyg_graphs
 
-    def encode(self, pyg_graphs: List[Data]) -> torch.Tensor:
+    def encode(self, pyg_graphs: List[Data]) -> Tuple[torch.Tensor, List[int]]:
         """
         Passes the PyG Data objects through the RGCN to generate dense subgraph embeddings.
         Returns a tensor of shape [num_graphs, out_channels].
         """
-        if self.model is None:
-            raise ValueError("Model has not been initialized. Call prepare_data with is_training=True first.")
+        # Ensure model is initialized before encoding
+        with self._lock:
+            if self.model is None:
+                raise ValueError("Model has not been initialized. Call prepare_data with is_training=True first.")
+            model = self.model
 
-        self.model.eval() # We use the encoder primarily for inference/feature extraction
+        model.eval() # We use the encoder primarily for inference/feature extraction
 
-        # Batching multiple graphs together for efficient processing
-        batch = Batch.from_data_list(pyg_graphs)
+        embeddings_list = []
+        valid_idx = []
+        for i, d in enumerate(pyg_graphs):
+            try:
+                batch = Batch.from_data_list([d])
+                with torch.no_grad():
+                    e = model(batch.x, batch.edge_index, batch.edge_type, batch.batch)
+                embeddings_list.append(e)
+                valid_idx.append(i)
+            except Exception as exc:
+                logger.warning(f"Failed to encode subgraph {d.get('graph_id', 'unknown')}: {exc}")
 
-        with torch.no_grad():
-            embeddings = self.model(batch.x, batch.edge_index, batch.edge_type, batch.batch)
+        if not embeddings_list:
+            return torch.empty(0, self.out_channels), valid_idx
 
-        return embeddings
+        embeddings = torch.cat(embeddings_list, dim=0)
+        return embeddings, valid_idx
 
     def extract_embeddings_with_ids(self, graphs: List[nx.DiGraph], is_training: bool = False) -> Tuple[torch.Tensor, List[str]]:
         """
@@ -174,7 +212,63 @@ class TopologicalGraphEncoder:
         if not pyg_graphs:
             return torch.empty(0, self.out_channels), []
 
-        embeddings = self.encode(pyg_graphs)
-        graph_ids = [data.graph_id for data in pyg_graphs]
+        embeddings, valid_idx = self.encode(pyg_graphs)
+        graph_ids = [pyg_graphs[i].graph_id for i in valid_idx]
 
         return embeddings, graph_ids
+
+    def save(self, path: str):
+        """
+        Saves the RGATEncoder weights and relation mapping to disk.
+        """
+        with self._lock:
+            if self.model is None:
+                logger.warning("No model to save.")
+                return
+
+            state = {
+                'model_state_dict': self.model.state_dict(),
+                'edge_type_mapping': self.edge_type_mapping,
+                'num_relations': self.num_relations,
+                'max_relations': self.max_relations,
+                'hidden_channels': self.hidden_channels,
+                'out_channels': self.out_channels,
+                'num_node_features': self.num_node_features
+            }
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(state, path)
+        logger.info(f"Saved GNN weights to {path}")
+
+    def load(self, path: str):
+        """
+        Loads the RGATEncoder weights and relation mapping from disk.
+        """
+        if not os.path.exists(path):
+            logger.warning(f"GNN weights file not found: {path}")
+            return False
+
+        try:
+            state = torch.load(path)
+            with self._lock:
+                self.edge_type_mapping = state['edge_type_mapping']
+                self.num_relations = state['num_relations']
+                self.max_relations = state.get('max_relations', state['num_relations'])
+                self.hidden_channels = state['hidden_channels']
+                self.out_channels = state['out_channels']
+                self.num_node_features = state['num_node_features']
+
+                # Re-initialize model with loaded parameters
+                self.model = RGATEncoder(
+                    in_channels=self.num_node_features,
+                    hidden_channels=self.hidden_channels,
+                    out_channels=self.out_channels,
+                    num_relations=max(1, self.max_relations)
+                )
+                self.model.load_state_dict(state['model_state_dict'])
+            logger.info(f"Loaded GNN weights from {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load GNN weights from {path}: {e}")
+            return False

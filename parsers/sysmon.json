@@ -1,0 +1,114 @@
+{
+  "name": "Windows Sysmon",
+  "priority": 10,
+  "match_rule": {
+    "field": "data.win.system.providerName",
+    "value": "Microsoft-Windows-Sysmon"
+  },
+  "group_by": [
+    "data.win.eventdata.process_tree_id",
+    "data.win.eventdata.session_id",
+    "data.win.eventdata.LogonId",
+    "data.win.eventdata.ProcessGuid",
+    "data.win.eventdata.ParentProcessGuid",
+    "data.win.eventdata.SourceIp"
+  ],
+  "timestamp": "@timestamp",
+  "event_id_field": "data.win.system.eventID",
+  "events": {
+    "1": {
+      "action": "process_created",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": "data.win.eventdata.ParentProcessGuid",
+          "attributes": {
+            "pid": "data.win.eventdata.ParentProcessId",
+            "image_name": "data.win.eventdata.ParentImage"
+          }
+        },
+        {
+          "type": "process",
+          "id_field": "data.win.eventdata.ProcessGuid",
+          "attributes": {
+            "pid": "data.win.eventdata.ProcessId",
+            "parent_pid": "data.win.eventdata.ParentProcessId",
+            "parent_process_guid": "data.win.eventdata.ParentProcessGuid",
+            "user": "data.win.eventdata.User",
+            "command_line": "data.win.eventdata.CommandLine",
+            "process_guid": "data.win.eventdata.ProcessGuid",
+            "image_name": "data.win.eventdata.Image"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": "data.win.eventdata.ParentProcessGuid",
+          "to": "data.win.eventdata.ProcessGuid",
+          "action": "process_created"
+        }
+      ]
+    },
+    "3": {
+      "action": "network_connection",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": "data.win.eventdata.ProcessGuid",
+          "attributes": {
+            "user": "data.win.eventdata.User",
+            "process_guid": "data.win.eventdata.ProcessGuid",
+            "image_name": "data.win.eventdata.Image"
+          }
+        },
+        {
+          "type": "ip",
+          "id_field": "data.win.eventdata.DestinationIp",
+          "attributes": {
+            "ip": "data.win.eventdata.DestinationIp",
+            "port": "data.win.eventdata.DestinationPort"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": "data.win.eventdata.ProcessGuid",
+          "to": "data.win.eventdata.DestinationIp",
+          "action": "network_connection",
+          "attributes": {
+            "port": "data.win.eventdata.DestinationPort",
+            "protocol": "data.win.eventdata.Protocol",
+            "src_ip": "data.win.eventdata.SourceIp"
+          }
+        }
+      ]
+    },
+    "11": {
+      "action": "file_created",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": "data.win.eventdata.ProcessGuid",
+          "attributes": {
+            "process_guid": "data.win.eventdata.ProcessGuid",
+            "image_name": "data.win.eventdata.Image"
+          }
+        },
+        {
+          "type": "file",
+          "id_field": "data.win.eventdata.TargetFilename",
+          "attributes": {
+            "path": "data.win.eventdata.TargetFilename"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": "data.win.eventdata.ProcessGuid",
+          "to": "data.win.eventdata.TargetFilename",
+          "action": "file_created"
+        }
+      ]
+    }
+  }
+}

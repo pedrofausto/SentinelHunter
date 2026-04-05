@@ -1,0 +1,102 @@
+{
+  "name": "Linux Auditd",
+  "priority": 10,
+  "match_rule": {
+    "field": "decoder.name",
+    "value": "auditd"
+  },
+  "group_by": [
+    "data.audit.session",
+    "data.audit.src_ip"
+  ],
+  "timestamp": "@timestamp",
+  "event_id_field": "data.audit.type",
+  "events": {
+    "EXECVE": {
+      "action": "process_executed",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": "data.audit.ppid",
+          "attributes": {
+            "pid": "data.audit.ppid"
+          }
+        },
+        {
+          "type": "process",
+          "id_field": "data.audit.pid",
+          "attributes": {
+            "pid": "data.audit.pid",
+            "parent_pid": "data.audit.ppid",
+            "exe": "data.audit.exe",
+            "user": "data.audit.auid",
+            "command_line": "data.audit.command"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": "data.audit.ppid",
+          "to": "data.audit.pid",
+          "action": "process_executed"
+        }
+      ]
+    },
+    "SYSCALL": {
+      "action": "system_call",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": "data.audit.pid",
+          "attributes": {
+            "pid": "data.audit.pid",
+            "exe": "data.audit.exe",
+            "user": "data.audit.auid"
+          }
+        },
+        {
+          "type": "file",
+          "id_field": "data.audit.file.name",
+          "attributes": {
+            "path": "data.audit.file.path"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": "data.audit.pid",
+          "to": "data.audit.file.name",
+          "action": "file_accessed"
+        }
+      ]
+    },
+    "SOCKADDR": {
+      "action": "network_connection",
+      "nodes": [
+        {
+          "type": "process",
+          "id_field": "data.audit.pid",
+          "attributes": {
+            "pid": "data.audit.pid",
+            "exe": "data.audit.exe"
+          }
+        },
+        {
+          "type": "ip",
+          "id_field": "data.audit.saddr",
+          "attributes": {
+            "ip": "data.audit.saddr",
+            "port": "data.audit.port"
+          }
+        }
+      ],
+      "edges": [
+        {
+          "from": "data.audit.pid",
+          "to": "data.audit.saddr",
+          "action": "network_connection"
+        }
+      ]
+    }
+  }
+}
