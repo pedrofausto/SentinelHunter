@@ -192,160 +192,324 @@ with t2:
                 if G.number_of_nodes() == 0:
                     st.warning("The forensic graph has no nodes to display.")
                 else:
-                    # --- Cytoscape Rendering ---
-                    nodes, edges = [], []
-                    TYPE_COLOR = {"process": "#c0392b", "file": "#2980b9", "ip": "#d68910", "unknown": "#717d7e"}
-                    SVG_PROC = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"%3E%3Cpath d="M2 3h20v14H2z" fill="none" stroke="white" stroke-width="1.5"/%3E%3Cpath d="M6 9l3 3-3 3M11 15h5" fill="none" stroke="white" stroke-width="1.5"/%3E%3C/svg%3E'
+                    # --- vis-network Rendering ---
+                    import os as _os
+                    vis_nodes, vis_edges = [], []
+
+                    _SKIP_ATTRS = {'type', 'id', 'features', 'log_type', 'agent_id'}
 
                     for n, data in G.nodes(data=True):
                         nt = data.get('type', 'unknown')
-                        # Build rich forensic tooltip
-                        tooltip = f"<div style='font-weight:bold; border-bottom:1px solid #3498db; margin-bottom:5px; padding-bottom:2px;'>{nt.upper()} FORENSICS</div>"
-                        tooltip += f"<b>Node ID:</b> {n}"
-                        for attr_k, attr_v in data.items():
-                            if attr_k not in ['type', 'id', 'features', 'log_type', 'image_name', 'name', 'agent_id']:
-                                label_key = attr_k.replace('_', ' ').title()
-                                tooltip += f"<br><b>{label_key}:</b> {attr_v}"
-                        
-                        # Node Labeling Logic: Priority on Process Name / Filename
-                        label = data.get('image_name') or data.get('name')
+
+                        # Rich forensic tooltip (HTML accepted by vis-network title)
+                        tooltip = (
+                            f"<div style='font-family:monospace;min-width:220px;'>"
+                            f"<div style='font-weight:700;font-size:13px;border-bottom:1px solid #3498db;"
+                            f"margin-bottom:6px;padding-bottom:4px;color:#5dade2;'>"
+                            f"{nt.upper()} &nbsp;·&nbsp; NODE</div>"
+                            f"<b style='color:#aaa'>ID:</b> <span style='color:#e0e0e0'>{n}</span>"
+                        )
+                        for k, v in data.items():
+                            if k not in _SKIP_ATTRS and v not in (None, '', []):
+                                tooltip += f"<br><b style='color:#aaa'>{k.replace('_',' ').title()}:</b> <span style='color:#e0e0e0'>{v}</span>"
+                        tooltip += "</div>"
+
+                        # Clean display label — no emoji (icons handle semantics)
+                        label = data.get('image_name') or data.get('name') or data.get('exe')
                         if not label:
-                            if '/' in str(n) or '\\' in str(n):
-                                import os
-                                label = os.path.basename(str(n))
-                            else:
-                                label = str(n)[:15]
-                        
-                        # Add type prefix for clarity in the UI
-                        display_label = f"{label}"
-                        if nt == 'ip': display_label = f"🌐 {label}"
-                        elif nt == 'file': display_label = f"📄 {label}"
-                        elif nt == 'process': display_label = f"⚙️ {label}"
+                            raw = str(n)
+                            # Strip resolver prefixes (proc_<guid>, ip_<addr>, file_<path>)
+                            for pfx in ('proc_', 'ip_', 'file_', 'proc_name_'):
+                                if raw.startswith(pfx):
+                                    raw = raw[len(pfx):]
+                                    break
+                            label = _os.path.basename(raw) if ('/' in raw or '\\' in raw) else raw
+                        label = str(label)[:28]
 
-                        nodes.append({"data": {
-                            "id": str(n), "label": display_label,
-                            "color": TYPE_COLOR.get(nt, "#717d7e"), "type": nt,
-                            "tooltip": tooltip
-                        }})
-                    
-                    for u, v, data in G.edges(data=True):
-                        action = data.get('action', 'related').upper()
-                        # Clean up action names for display
-                        display_action = action.replace('_', ' ').title()
-                        
-                        tooltip = f"<div style='font-weight:bold; border-bottom:1px solid #3498db; margin-bottom:5px; padding-bottom:2px;'>RELATIONSHIP DETAIL</div>"
-                        tooltip += f"<b>Action:</b> {action}"
-                        for attr_k, attr_v in data.items():
-                            if attr_k not in ['action', 'timestamp', 'log_type', 'event_id']:
-                                label_key = attr_k.replace('_', ' ').title()
-                                tooltip += f"<br><b>{label_key}:</b> {attr_v}"
-                        edges.append({"data": {
-                            "source": str(u), "target": str(v), "label": display_action,
-                            "tooltip": tooltip
-                        }})
-                    
-                    cy_json = json.dumps({"nodes": nodes, "edges": edges})
-                    html = f"""
-                    <!DOCTYPE html><html><head>
-                    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.29.2/cytoscape.min.js"></script>
-                    <script src="https://unpkg.com/@popperjs/core@2"></script>
-                    <script src="https://unpkg.com/cytoscape-popper@2.0.0/cytoscape-popper.js"></script>
-                    <script src="https://unpkg.com/tippy.js@6"></script>
-                    <link rel="stylesheet" href="https://unpkg.com/tippy.js@6/animations/scale.css" />
-                    <style>
-                        #cy {{ width: 100%; height: 600px; background: #07091a; border: 1px solid #1f2a4d; border-radius: 10px; }}
-                        .tippy-box[data-theme~='custom'] {{
-                            background-color: #1a1c33;
-                            color: #e0e0e0;
-                            border: 1px solid #3498db;
-                            font-family: 'Inter', sans-serif;
-                            font-size: 12px;
-                            border-radius: 8px;
-                            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-                        }}
-                        .tippy-content {{ padding: 8px; }}
-                    </style></head>
-                    <body><div id="cy"></div><script>
-                    try {{
-                        var cy = cytoscape({{
-                            container: document.getElementById('cy'),
-                            elements: {cy_json},
-                            style: [
-                                {{ 
-                                    selector: 'node', 
-                                    style: {{ 
-                                        'background-color': 'data(color)', 
-                                        'label': 'data(label)', 
-                                        'color': '#fff', 
-                                        'font-size': '12px', 
-                                        'font-weight': 'bold',
-                                        'text-outline-width': 2, 
-                                        'text-outline-color': '#07091a',
-                                        'text-valign': 'top',
-                                        'text-margin-y': -10
-                                    }} 
-                                }},
-                                {{ selector: 'node[type="process"]', style: {{ 'background-image': '{SVG_PROC}', 'background-fit': 'cover', 'background-width': '60%' }} }},
-                                {{ 
-                                    selector: 'edge', 
-                                    style: {{ 
-                                        'width': 3, 
-                                        'line-color': '#444', 
-                                        'target-arrow-color': '#444', 
-                                        'target-arrow-shape': 'triangle', 
-                                        'curve-style': 'bezier', 
-                                        'label': 'data(label)', 
-                                        'font-size': '10px', 
-                                        'font-weight': 'bold',
-                                        'color': '#3498db', 
-                                        'text-rotation': 'autorotate',
-                                        'text-background-opacity': 0.8,
-                                        'text-background-color': '#07091a',
-                                        'text-background-padding': '2px',
-                                        'text-background-shape': 'roundrectangle'
-                                    }} 
-                                }}
-                            ],
-                            layout: {{ name: 'cose', padding: 50, animate: true }}
-                        }});
+                        vis_nodes.append({
+                            "id": str(n),
+                            "label": label,
+                            "type": nt,
+                            "tooltip": tooltip,
+                            "in_deg": G.in_degree(n),
+                            "out_deg": G.out_degree(n),
+                            "is_shadow": data.get('log_type') == 'shadow',
+                        })
 
-                        function makeTippy(ele, text) {{
-                            if (!ele.popperRef) return null;
-                            var ref = ele.popperRef();
-                            var dummyDomEle = document.createElement('div');
-                            return tippy(dummyDomEle, {{
-                                getReferenceClientRect: ref.getBoundingClientRect,
-                                trigger: 'manual',
-                                content: function() {{
-                                    var div = document.createElement('div');
-                                    div.innerHTML = text;
-                                    return div;
-                                }},
-                                arrow: true,
-                                placement: 'top',
-                                hideOnClick: false,
-                                sticky: 'reference',
-                                interactive: true,
-                                appendTo: document.body,
-                                theme: 'custom',
-                                animation: 'scale'
-                            }});
-                        }}
+                    for u, v, edata in G.edges(data=True):
+                        action = edata.get('action', 'related').replace('_', ' ').title()
+                        is_bridge = edata.get('log_type') == 'bridge'
 
-                        cy.elements().forEach(function(ele) {{
-                            var tip = makeTippy(ele, ele.data('tooltip'));
-                            if (tip) {{
-                                ele.on('mouseover', function() {{ tip.show(); }});
-                                ele.on('mouseout', function() {{ tip.hide(); }});
-                            }}
-                        }});
-                    }} catch (e) {{
-                        document.body.innerHTML = "<h3 style='color:white; padding:20px;'>Graph Rendering Error: " + e.message + "</h3>";
-                        console.error(e);
-                    }}
-                    </script></body></html>
-                    """
-                    st.components.v1.html(html, height=620)
+                        etip = (
+                            f"<div style='font-family:monospace;'>"
+                            f"<div style='font-weight:700;color:#5dade2;border-bottom:1px solid #3498db;"
+                            f"margin-bottom:5px;padding-bottom:3px;'>EDGE · {action.upper()}</div>"
+                        )
+                        for ek, ev in edata.items():
+                            if ek not in {'action', 'log_type', 'event_id'} and ev not in (None, ''):
+                                etip += f"<b style='color:#aaa'>{ek.replace('_',' ').title()}:</b> {ev}<br>"
+                        etip += "</div>"
+
+                        vis_edges.append({
+                            "from": str(u),
+                            "to": str(v),
+                            "label": action,
+                            "tooltip": etip,
+                            "is_bridge": is_bridge,
+                        })
+
+                    graph_json = json.dumps({"nodes": vis_nodes, "edges": vis_edges})
+
+                    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
+<link  rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #07091a; overflow: hidden; font-family: 'Inter', monospace; }}
+  #graph {{
+    width: 100%; height: 680px;
+    background: radial-gradient(ellipse at 50% 40%, #0d1035 0%, #07091a 70%);
+    border: 1px solid #1f2a4d; border-radius: 12px;
+  }}
+  /* vis-network tooltip override */
+  .vis-tooltip {{
+    background: #10122a !important;
+    color: #e0e0e0 !important;
+    border: 1px solid #2e86c1 !important;
+    border-radius: 8px !important;
+    font-size: 12px !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.7) !important;
+    padding: 10px 14px !important;
+    max-width: 340px !important;
+  }}
+  #legend {{
+    position: absolute; bottom: 14px; left: 16px;
+    background: rgba(10,12,30,0.85); border: 1px solid #1f2a4d;
+    border-radius: 10px; padding: 10px 14px;
+    display: flex; flex-wrap: wrap; gap: 10px 18px;
+    font-size: 11px; color: #aaa; pointer-events: none;
+    backdrop-filter: blur(4px);
+  }}
+  #legend span {{ display: flex; align-items: center; gap: 5px; }}
+  #legend i {{ width: 14px; text-align: center; }}
+  #badge-root  {{ position:absolute; top:14px; left:16px; background:rgba(241,196,15,0.15);
+    border:1px solid #f1c40f; border-radius:6px; padding:4px 10px;
+    color:#f1c40f; font-size:11px; pointer-events:none; }}
+  #badge-leaf  {{ position:absolute; top:14px; left:140px; background:rgba(231,76,60,0.15);
+    border:1px solid #e74c3c; border-radius:6px; padding:4px 10px;
+    color:#e74c3c; font-size:11px; pointer-events:none; }}
+  #controls {{ position:absolute; top:14px; right:16px; display:flex; gap:8px; }}
+  .ctrl-btn {{
+    background: rgba(30,40,80,0.8); border: 1px solid #1f2a4d;
+    color: #7fb3d3; border-radius: 6px; padding: 5px 12px;
+    cursor: pointer; font-size: 11px; transition: all .2s;
+  }}
+  .ctrl-btn:hover {{ background: #1f3a5f; color: #fff; }}
+</style>
+</head><body>
+<div style="position:relative;">
+  <div id="graph"></div>
+  <div id="badge-root">⬡ ENTRY POINT</div>
+  <div id="badge-leaf">◆ TARGET NODE</div>
+  <div id="controls">
+    <button class="ctrl-btn" onclick="network.fit()">⊕ Fit</button>
+    <button class="ctrl-btn" onclick="network.setOptions({{physics:{{enabled:true}}}});setTimeout(()=>network.setOptions({{physics:{{enabled:false}}}}),3000)">↺ Relayout</button>
+  </div>
+  <div id="legend">
+    <span><i class="fa-solid fa-terminal"  style="color:#e74c3c"></i> Process</span>
+    <span><i class="fa-solid fa-globe"     style="color:#f39c12"></i> IP Address</span>
+    <span><i class="fa-solid fa-file"      style="color:#3498db"></i> File</span>
+    <span><i class="fa-solid fa-user"      style="color:#9b59b6"></i> User</span>
+    <span><i class="fa-solid fa-server"    style="color:#2ecc71"></i> Service</span>
+    <span><i class="fa-solid fa-sitemap"   style="color:#1abc9c"></i> Domain</span>
+    <span><i class="fa-solid fa-database"  style="color:#e67e22"></i> Registry</span>
+    <span style="border-left:1px dashed #333;padding-left:12px">
+      <i class="fa-solid fa-circle" style="color:#f1c40f;font-size:8px"></i> Entry&nbsp;&nbsp;
+      <i class="fa-solid fa-circle" style="color:#e74c3c;font-size:8px"></i> Target&nbsp;&nbsp;
+      <span style="border-top:2px dashed #666;width:18px;display:inline-block;vertical-align:middle"></span> Inferred edge
+    </span>
+  </div>
+</div>
+<script>
+(function() {{
+  // ── Type config ───────────────────────────────────────────────────────────
+  var TYPE_CFG = {{
+    process:  {{ fa: '\\uf120', color: '#e74c3c', glow: 'rgba(231,76,60,0.45)'  }},
+    ip:       {{ fa: '\\uf0ac', color: '#f39c12', glow: 'rgba(243,156,18,0.40)' }},
+    file:     {{ fa: '\\uf15b', color: '#3498db', glow: 'rgba(52,152,219,0.40)' }},
+    user:     {{ fa: '\\uf007', color: '#9b59b6', glow: 'rgba(155,89,182,0.40)' }},
+    service:  {{ fa: '\\uf233', color: '#2ecc71', glow: 'rgba(46,204,113,0.35)' }},
+    domain:   {{ fa: '\\uf0e8', color: '#1abc9c', glow: 'rgba(26,188,156,0.35)' }},
+    registry: {{ fa: '\\uf1c0', color: '#e67e22', glow: 'rgba(230,126,34,0.40)' }},
+    unknown:  {{ fa: '\\uf128', color: '#7f8c8d', glow: 'rgba(127,140,141,0.25)' }},
+  }};
+
+  function resolveType(n) {{
+    var t = n.type || 'unknown';
+    if (t === 'file') {{
+      var id = (n.id + n.label).toLowerCase();
+      if (id.indexOf('hk') === 0 || id.indexOf('hkey') >= 0 || id.indexOf('\\\\software') >= 0) return 'registry';
+    }}
+    if (t === 'ip') {{
+      // If looks like a domain (letters + dot + tld) treat as domain
+      if (/^[a-z].*\.[a-z]{{2,}}$/i.test(n.label) && !/^\\d/.test(n.label)) return 'domain';
+    }}
+    if (t === 'process') {{
+      var lbl = n.label.toLowerCase();
+      if (lbl === 'svchost.exe' || lbl === 'services.exe' || lbl === 'lsass.exe') return 'service';
+    }}
+    return t in TYPE_CFG ? t : 'unknown';
+  }}
+
+  var raw = {graph_json};
+
+  // ── Degree map from edges ─────────────────────────────────────────────────
+  var inDeg = {{}}, outDeg = {{}};
+  raw.nodes.forEach(function(n) {{ inDeg[n.id] = 0; outDeg[n.id] = 0; }});
+  raw.edges.forEach(function(e) {{
+    outDeg[e.from] = (outDeg[e.from] || 0) + 1;
+    inDeg[e.to]   = (inDeg[e.to]   || 0) + 1;
+  }});
+
+  // ── HTML tooltip helper ───────────────────────────────────────────────────
+  function mkTip(html) {{
+    var el = document.createElement('div');
+    el.innerHTML = html;
+    return el;
+  }}
+
+  // ── Build vis DataSets ────────────────────────────────────────────────────
+  var visNodes = new vis.DataSet(raw.nodes.map(function(n) {{
+    var rtype   = resolveType(n);
+    var cfg     = TYPE_CFG[rtype] || TYPE_CFG.unknown;
+    var isRoot  = (inDeg[n.id] || 0) === 0;
+    var isLeaf  = (outDeg[n.id] || 0) === 0;
+    var isShadow = n.is_shadow;
+
+    var iconColor = isRoot ? '#f1c40f' : (isLeaf ? '#e74c3c' : cfg.color);
+    var borderColor = isRoot ? '#f1c40f' : (isLeaf ? '#e74c3c' : '#1f2a4d');
+    var glowColor   = isRoot ? 'rgba(241,196,15,0.55)' : (isLeaf ? 'rgba(231,76,60,0.45)' : cfg.glow);
+    var iconSize    = isRoot ? 52 : (isLeaf ? 38 : 40);
+
+    return {{
+      id:    n.id,
+      label: n.label,
+      title: mkTip(n.tooltip),
+      shape: 'icon',
+      icon: {{
+        face:   '"Font Awesome 6 Free"',
+        weight: '900',
+        code:   cfg.fa,
+        size:   iconSize,
+        color:  isShadow ? '#555' : iconColor,
+      }},
+      font: {{
+        color:       '#c8d6e5',
+        size:        11,
+        face:        'monospace',
+        strokeWidth: 3,
+        strokeColor: '#07091a',
+        vadjust:     8,
+      }},
+      shadow: {{ enabled: true, color: isShadow ? 'transparent' : glowColor, size: 18, x: 0, y: 0 }},
+      borderWidth:         isRoot || isLeaf ? 3 : 1,
+      borderWidthSelected: 4,
+      color: {{
+        border:     borderColor,
+        background: 'transparent',
+        highlight:  {{ border: '#5dade2', background: 'transparent' }},
+        hover:      {{ border: '#85c1e9', background: 'transparent' }},
+      }},
+    }};
+  }}));
+
+  var visEdges = new vis.DataSet(raw.edges.map(function(e, idx) {{
+    return {{
+      id:     idx,
+      from:   e.from,
+      to:     e.to,
+      label:  e.label,
+      title:  mkTip(e.tooltip),
+      arrows: {{ to: {{ enabled: true, scaleFactor: 0.6, type: 'arrow' }} }},
+      dashes: e.is_bridge ? [6, 4] : false,
+      width:  e.is_bridge ? 1 : 1.8,
+      color: {{
+        color:     e.is_bridge ? '#2c3e50' : '#34495e',
+        highlight: '#3498db',
+        hover:     '#5dade2',
+      }},
+      font: {{
+        color:            '#7f8c8d',
+        size:             9,
+        strokeWidth:      2,
+        strokeColor:      '#07091a',
+        align:            'middle',
+        background:       'rgba(7,9,26,0.75)',
+      }},
+      smooth: {{ type: 'curvedCW', roundness: 0.12 }},
+      selectionWidth: 3,
+    }};
+  }}));
+
+  // ── Network options ───────────────────────────────────────────────────────
+  var options = {{
+    physics: {{
+      enabled: true,
+      solver: 'forceAtlas2Based',
+      forceAtlas2Based: {{
+        gravitationalConstant: -55,
+        centralGravity:        0.008,
+        springLength:          130,
+        springConstant:        0.06,
+        damping:               0.45,
+        avoidOverlap:          0.6,
+      }},
+      stabilization: {{ iterations: 180, updateInterval: 20, fit: true }},
+    }},
+    interaction: {{
+      hover:            true,
+      tooltipDelay:     80,
+      hideEdgesOnDrag:  true,
+      multiselect:      true,
+      navigationButtons: false,
+      keyboard:         {{ enabled: true, speed: {{ x:10, y:10, zoom:0.03 }} }},
+      zoomSpeed:        0.7,
+    }},
+    nodes: {{ chosen: true }},
+    edges: {{ chosen: true }},
+  }};
+
+  var container = document.getElementById('graph');
+  var network   = new vis.Network(container, {{ nodes: visNodes, edges: visEdges }}, options);
+
+  // ── Click: highlight 1-hop neighbourhood ──────────────────────────────────
+  var _highlighted = [];
+  network.on('click', function(params) {{
+    // Restore previous highlight
+    if (_highlighted.length) {{
+      visEdges.update(_highlighted.map(function(id) {{
+        return {{ id: id, width: visEdges.get(id).dashes ? 1 : 1.8, color: {{ color: visEdges.get(id).dashes ? '#2c3e50' : '#34495e' }} }};
+      }}));
+      _highlighted = [];
+    }}
+    if (!params.nodes.length) return;
+    var connEdges = network.getConnectedEdges(params.nodes[0]);
+    _highlighted  = connEdges;
+    visEdges.update(connEdges.map(function(id) {{
+      return {{ id: id, width: 3, color: {{ color: '#3498db' }} }};
+    }}));
+  }});
+
+  // Stop physics after stabilisation for a clean frozen look
+  network.once('stabilizationIterationsDone', function() {{
+    network.setOptions({{ physics: {{ enabled: false }} }});
+    network.fit({{ animation: {{ duration: 600, easingFunction: 'easeInOutQuad' }} }});
+  }});
+}})();
+</script>
+</body></html>"""
+                    st.components.v1.html(html, height=720)
             else:
                 st.error("No logs found for reconstruction.")
     else:
