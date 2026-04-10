@@ -28,14 +28,18 @@ from lib.consumers import LogConsumer, OpenSearchPollingConsumer
 # --- Connection Helper ---
 @st.cache_resource
 def get_opensearch():
+    host = os.getenv("OPENSEARCH_HOST", "localhost")
+    port = int(os.getenv("OPENSEARCH_PORT", "9201"))
     try:
-        return OpenSearch([{'host': 'localhost', 'port': 9200}])
+        return OpenSearch([{'host': host, 'port': port}])
     except Exception:
         return None
 
 client = get_opensearch()
-log_consumer = OpenSearchPollingConsumer(host='localhost', port=9200)
-builder = GraphBuilder(log_consumer=log_consumer)
+host = os.getenv("OPENSEARCH_HOST", "localhost")
+port = int(os.getenv("OPENSEARCH_PORT", "9201"))
+log_consumer = OpenSearchPollingConsumer(host=host, port=port)
+builder = GraphBuilder(log_consumer=log_consumer, host=host, port=port)
 
 # --- Sidebar ---
 st.sidebar.title("🛡️ SentinelHunter")
@@ -79,11 +83,22 @@ if st.sidebar.button("🗑️ Wipe State"):
             st.sidebar.info("No checkpoint file found.")
     except Exception as e:
         st.sidebar.error(f"Failed to wipe checkpoint: {e}")
-    # Use st.rerun() if supported, otherwise st.experimental_rerun()
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
+    try: st.rerun()
+    except: st.experimental_rerun()
+
+if st.sidebar.button("🧨 Nuke OpenSearch Data"):
+    with st.spinner("Purging all Sentinel indices..."):
+        indices = ['sentinel-incidents', 'sentinel-baseline', 'logs-sentinel', 'logs-sentinel*']
+        for idx in indices:
+            try:
+                client.indices.delete(index=idx, ignore=[400, 404])
+            except Exception as e:
+                st.sidebar.error(f"Error deleting {idx}: {e}")
+        # Wipe local state too for completeness
+        if os.path.exists(".sentinel_state.json"): os.remove(".sentinel_state.json")
+        st.sidebar.success("Database Nuked! Ready for fresh ingestion.")
+        try: st.rerun()
+        except: st.experimental_rerun()
 
 if st.sidebar.button("🔥 Re-Ingest Malicious Samples"):
     re_ingest_malicious()
@@ -155,31 +170,54 @@ with t2:
     # Selection logic
     available_ids = []
     try:
-        res = client.search(index="sentinel-incidents", body={"size": 100, "_source": ["graph_id", "incident_title"]})
+        # Increase size and sort by @timestamp desc to show recent incidents first
+        res = client.search(index="sentinel-incidents", body={
+            "size": 500, 
+            "sort": [{"@timestamp": {"order": "desc"}}],
+            "_source": ["graph_id", "incident_title"]
+        })
         available_ids = [(h['_source']['graph_id'], h['_source']['incident_title']) for h in res['hits']['hits']]
     except Exception: pass
     
     if available_ids:
         titles = [f"{t} ({i[:8]})" for i, t in available_ids]
-        selected_title = st.selectbox("Select Target Anomaly", titles, index=0 if 'selected_id' not in st.session_state else [i for i, t in available_ids].index(st.session_state['selected_id']))
+        
+        # Safe index lookup to prevent crash if selected_id is no longer available
+        ids_list = [i for i, t in available_ids]
+        default_idx = 0
+        if 'selected_id' in st.session_state and st.session_state['selected_id'] in ids_list:
+            default_idx = ids_list.index(st.session_state['selected_id'])
+            
+        selected_title = st.selectbox("Select Target Anomaly", titles, index=default_idx)
         target_id = available_ids[titles.index(selected_title)][0]
         
         if st.button("Reconstruct Forensic Graph"):
             # Fetch source logs
             try:
-                res = client.search(index="sentinel-incidents", body={"query": {"match": {"graph_id": target_id}}, "size": 1})
+                # Use exact term match on .keyword subfield for GUIDs with dashes
+                res = client.search(index="sentinel-incidents", body={"query": {"term": {"graph_id.keyword": target_id}}, "size": 1})
                 src_ids = res['hits']['hits'][0]['_source'].get('source_doc_ids', []) if res['hits']['hits'] else []
+                from datetime import timedelta
+                
+                # Dynamically bound the deep-dive window to 48 hours around the incident
+                incident_time_iso = res['hits']['hits'][0]['_source'].get('@timestamp') if res['hits']['hits'] else datetime.now(timezone.utc).isoformat()
+                dt = datetime.fromisoformat(incident_time_iso.replace('Z', '+00:00'))
+                start_query_ts = (dt - timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+                end_query_ts = (dt + timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
                 
                 logs = []
                 if src_ids:
-                    l_res = client.search(index="logs-sentinel*", body={"query": {"ids": {"values": src_ids}}, "size": 1000})
+                    l_res = client.search(index="logs-*", body={"query": {"ids": {"values": src_ids}}, "size": 1000})
                     logs = [dict(h['_source'], _id=h['_id']) for h in l_res['hits']['hits']]
             except Exception as e:
                 st.error(f"Failed to query OpenSearch: {e}")
                 logs = []
+                from datetime import timedelta
+                start_query_ts = (datetime.now(timezone.utc) - timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+                end_query_ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
             
             if not logs:
-                logs = builder.fetch_logs_with_ancestry("2000-01-01T00:00:00Z", "2099-01-01T00:00:00Z", filter_id=target_id.rsplit('_', 1)[0])
+                logs = builder.fetch_logs_with_ancestry(start_query_ts, end_query_ts, filter_id=target_id.rsplit('_', 1)[0])
             
             if logs:
                 G = builder.build_unified_graph(logs, graph_id=target_id)
@@ -201,17 +239,23 @@ with t2:
                     for n, data in G.nodes(data=True):
                         nt = data.get('type', 'unknown')
 
+                        # Extract timestamp for header
+                        ts = data.get('timestamp') or data.get('@timestamp', 'N/A')
+                        if ts and 'T' in ts:
+                             ts = ts.replace('T', ' ').split('.')[0] # Clean display
+
                         # Rich forensic tooltip (HTML accepted by vis-network title)
                         tooltip = (
-                            f"<div style='font-family:monospace;min-width:220px;'>"
+                            f"<div style='font-family:monospace;min-width:240px;'>"
                             f"<div style='font-weight:700;font-size:13px;border-bottom:1px solid #3498db;"
-                            f"margin-bottom:6px;padding-bottom:4px;color:#5dade2;'>"
+                            f"margin-bottom:4px;padding-bottom:4px;color:#5dade2;'>"
                             f"{nt.upper()} &nbsp;·&nbsp; NODE</div>"
-                            f"<b style='color:#aaa'>ID:</b> <span style='color:#e0e0e0'>{n}</span>"
+                            f"<div style='color:#f1c40f;font-size:11px;margin-bottom:8px;'>🕒 {ts}</div>"
+                            f"<b style='color:#aaa'>ID:</b> <span style='color:#e0e0e0;word-break:break-all;'>{n}</span>"
                         )
                         for k, v in data.items():
-                            if k not in _SKIP_ATTRS and v not in (None, '', []):
-                                tooltip += f"<br><b style='color:#aaa'>{k.replace('_',' ').title()}:</b> <span style='color:#e0e0e0'>{v}</span>"
+                            if k not in _SKIP_ATTRS and k not in ('timestamp', '@timestamp') and v not in (None, '', []):
+                                tooltip += f"<br><b style='color:#aaa'>{k.replace('_',' ').title()}:</b> <span style='color:#e0e0e0;word-break:break-all;'>{v}</span>"
                         tooltip += "</div>"
 
                         # Clean display label — no emoji (icons handle semantics)
@@ -240,14 +284,19 @@ with t2:
                         action = edata.get('action', 'related').replace('_', ' ').title()
                         is_bridge = edata.get('log_type') == 'bridge'
 
+                        ets = edata.get('timestamp') or edata.get('@timestamp', 'N/A')
+                        if ets and 'T' in ets:
+                            ets = ets.replace('T', ' ').split('.')[0]
+
                         etip = (
-                            f"<div style='font-family:monospace;'>"
+                            f"<div style='font-family:monospace;min-width:200px;'>"
                             f"<div style='font-weight:700;color:#5dade2;border-bottom:1px solid #3498db;"
                             f"margin-bottom:5px;padding-bottom:3px;'>EDGE · {action.upper()}</div>"
+                            f"<div style='color:#f1c40f;font-size:11px;margin-bottom:8px;'>🕒 {ets}</div>"
                         )
                         for ek, ev in edata.items():
-                            if ek not in {'action', 'log_type', 'event_id'} and ev not in (None, ''):
-                                etip += f"<b style='color:#aaa'>{ek.replace('_',' ').title()}:</b> {ev}<br>"
+                            if ek not in {'action', 'log_type', 'event_id', 'timestamp', '@timestamp'} and ev not in (None, ''):
+                                etip += f"<b style='color:#aaa'>{ek.replace('_',' ').title()}:</b> <span style='word-break:break-all;'>{ev}</span><br>"
                         etip += "</div>"
 
                         vis_edges.append({
@@ -281,7 +330,8 @@ with t2:
     font-size: 12px !important;
     box-shadow: 0 4px 20px rgba(0,0,0,0.7) !important;
     padding: 10px 14px !important;
-    max-width: 340px !important;
+    max-width: 450px !important;
+    word-break: break-all !important;
   }}
   #legend {{
     position: absolute; bottom: 14px; left: 16px;

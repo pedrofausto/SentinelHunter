@@ -12,7 +12,9 @@ class ReportingEngine:
     into a dedicated OpenSearch index for long-term tracking and dashboarding.
     """
 
-    def __init__(self, host: str = 'localhost', port: int = 9200, index: str = 'sentinel-incidents', maxsize: int = 25, timeout: int = 30, max_retries: int = 3, **kwargs):
+    def __init__(self, host: str = None, port: int = None, index: str = 'sentinel-incidents', maxsize: int = 25, timeout: int = 30, max_retries: int = 3, **kwargs):
+        host = host or os.getenv('OPENSEARCH_HOST', 'localhost')
+        port = port or int(os.getenv('OPENSEARCH_PORT', '9201'))
         self.index = index
         try:
             self.client = OpenSearch(

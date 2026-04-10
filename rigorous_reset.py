@@ -3,6 +3,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from opensearchpy import OpenSearch, helpers
+from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RigorousReset")
@@ -10,10 +11,13 @@ logger = logging.getLogger("RigorousReset")
 logging.getLogger("opensearch").setLevel(logging.WARNING)
 
 def reset(benign_only: bool = False):
-    client = OpenSearch([{'host': 'localhost', 'port': 9200}])
+    load_dotenv()
+    host = os.getenv("OPENSEARCH_HOST", "localhost")
+    port = int(os.getenv("OPENSEARCH_PORT", "9201"))
+    client = OpenSearch([{'host': host, 'port': port}])
     
     # 1. Wipe indices
-    indices = ['sentinel-incidents', 'sentinel-baseline', 'logs-sentinel*']
+    indices = ['sentinel-incidents', 'sentinel-baseline', 'logs-sentinel', 'logs-sentinel*']
     for idx in indices:
         try:
             client.indices.delete(index=idx, ignore=[400, 404])

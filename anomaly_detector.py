@@ -105,9 +105,16 @@ class AnomalyDetector:
             
             if is_anomaly:
                 anomalous_ids.append(g_id)
-                # Ensure confidence_score is properly scaled [0, 1] relative to threshold
+                # Scale confidence using a sigmoid so scores spread across [0.5, 1.0].
+                # A score exactly at threshold → ~0.55; 2x threshold → ~0.76; 5x → ~0.93.
+                # This prevents all anomalies collapsing to 100% when the ensemble
+                # scores are uniformly high (common at nu=0.03).
                 base_thresh = m_threshs.get('consensus', 0.1)
-                norm_conf = float(min(1.0, combined_scores[i] / (base_thresh * 2) if base_thresh != 0 else 0.5))
+                if base_thresh > 0:
+                    excess_ratio = combined_scores[i] / base_thresh  # 1.0 = right at threshold
+                    norm_conf = float(1.0 / (1.0 + np.exp(-0.8 * (excess_ratio - 2.5))))
+                else:
+                    norm_conf = 0.5
                 detailed_scores[g_id] = {
                     'confidence_score': norm_conf,
                     'raw_consensus': float(combined_scores[i]),

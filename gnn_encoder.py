@@ -1,7 +1,7 @@
 import os
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import RGATConv, global_mean_pool, global_max_pool
+from torch_geometric.nn import SAGEConv, global_mean_pool, global_max_pool
 import networkx as nx
 from typing import List, Dict, Any, Tuple
 import logging
@@ -11,31 +11,30 @@ from torch_geometric.data import Data, Batch
 
 logger = logging.getLogger(__name__)
 
-class RGATEncoder(torch.nn.Module):
+class GraphSAGEEncoder(torch.nn.Module):
     """
-    Relational Graph Attention Network (RGAT).
-    Uses multi-head attention to learn which node relationships are most 
-    critical for identifying malicious intent.
+    Inductive GraphSAGE Encoder.
+    Scales to unseen nodes and edges without requiring static relation mappings.
     """
-    def __init__(self, in_channels: int, hidden_channels: int, out_channels: int, num_relations: int):
+    def __init__(self, in_channels: int, hidden_channels: int, out_channels: int):
         super().__init__()
-        # Layer 1: Relational Attention
-        self.conv1 = RGATConv(in_channels, hidden_channels, num_relations, heads=4, concat=True)
-        # Layer 2: Relational Attention with Residual
-        self.conv2 = RGATConv(hidden_channels * 4, hidden_channels, num_relations, heads=4, concat=False)
+        # Layer 1: Inductive Aggregation
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+        # Layer 2: Inductive Aggregation
+        self.conv2 = SAGEConv(hidden_channels, hidden_channels)
         
         # Linear layers for pooling and final embedding
         self.lin1 = torch.nn.Linear(hidden_channels, hidden_channels)
         self.lin2 = torch.nn.Linear(hidden_channels, out_channels)
 
-    def forward(self, x, edge_index, edge_type, batch):
+    def forward(self, x, edge_index, batch):
         # Initial convolution
-        x1 = self.conv1(x, edge_index, edge_type)
+        x1 = self.conv1(x, edge_index)
         x1 = F.elu(x1)
         x1 = F.dropout(x1, p=0.2, training=self.training)
 
-        # Second convolution with Attention
-        x2 = self.conv2(x1, edge_index, edge_type)
+        # Second convolution
+        x2 = self.conv2(x1, edge_index)
         x2 = F.elu(x2)
 
         # Pooling: Combine Mean and Max pooling to capture both "average" behavior 
@@ -52,7 +51,7 @@ class RGATEncoder(torch.nn.Module):
 class TopologicalGraphEncoder:
     """
     Advanced encoder that transforms NetworkX provenance graphs into dense embeddings
-    using Relational Graph Attention. Focuses on structural importance (centrality, degree).
+    using GraphSAGE. Purely inductive and scales dynamically to unseen entities.
     """
     def __init__(self, hidden_channels: int = 64, out_channels: int = 32):
         self.hidden_channels = hidden_channels
@@ -106,39 +105,16 @@ class TopologicalGraphEncoder:
         x_list = [self._create_node_features(G, node) for node in G.nodes()]
         x = torch.stack(x_list)
 
-        # Edge indices and types
+        # Edge indices
         edge_indices = [[], []]
-        edge_types = []
 
         for u, v, data in G.edges(data=True):
             edge_indices[0].append(node_mapping[u])
             edge_indices[1].append(node_mapping[v])
 
-            action = data.get('action', 'unknown').lower()
-            with self._lock:
-                if is_training and action not in self.edge_type_mapping:
-                    self.edge_type_mapping[action] = self.num_relations
-                    self.num_relations += 1
-                e_type = self.edge_type_mapping.get(action, 0)
-                
-                # Cap edge_type to the model's capacity to avoid IndexError.
-                # Log a warning once per unknown type so operators know retraining may help.
-                if self.max_relations > 0 and e_type >= self.max_relations:
-                    if action not in self._warned_edge_types:
-                        logger.warning(
-                            f"[GNN] Unknown edge type '{action}' (index {e_type}) exceeds model "
-                            f"capacity ({self.max_relations} relations). Mapping to relation 0. "
-                            "Retraining is recommended if this type appears frequently."
-                        )
-                        self._warned_edge_types.add(action)
-                    e_type = 0
-
-            edge_types.append(e_type)
-
         return Data(
             x=x, 
             edge_index=torch.tensor(edge_indices, dtype=torch.long),
-            edge_type=torch.tensor(edge_types, dtype=torch.long),
             graph_id=G.graph.get('graph_id', 'unknown')
         )
 
@@ -159,22 +135,21 @@ class TopologicalGraphEncoder:
         if is_training:
             with self._lock:
                 if self.model is None:
-                    # Initialize model now that we know num_relations
-                    # Ensure at least 1 relation to avoid errors in RGATConv
-                    self.max_relations = max(1, self.num_relations)
-                    self.model = RGATEncoder(
+                    # Initialize inductive SAGE model
+                    self.model = GraphSAGEEncoder(
                         in_channels=self.num_node_features,
                         hidden_channels=self.hidden_channels,
-                        out_channels=self.out_channels,
-                        num_relations=self.max_relations
+                        out_channels=self.out_channels
                     )
-                    logger.info(f"Initialized RGATEncoder with {self.num_node_features} node features and {self.max_relations} relations.")
+                    logger.info(f"Initialized GraphSAGEEncoder with {self.num_node_features} node features.")
+                # Explicit strict mode enforcement for training
+                self.model.train()
 
         return pyg_graphs
 
     def encode(self, pyg_graphs: List[Data]) -> Tuple[torch.Tensor, List[int]]:
         """
-        Passes the PyG Data objects through the RGCN to generate dense subgraph embeddings.
+        Passes the PyG Data objects through the GraphSAGE encoder to generate dense subgraph embeddings.
         Returns a tensor of shape [num_graphs, out_channels].
         """
         # Ensure model is initialized before encoding
@@ -183,7 +158,8 @@ class TopologicalGraphEncoder:
                 raise ValueError("Model has not been initialized. Call prepare_data with is_training=True first.")
             model = self.model
 
-        model.eval() # We use the encoder primarily for inference/feature extraction
+        # Strict eval mode enforcement for inference
+        model.eval() 
 
         embeddings_list = []
         valid_idx = []
@@ -191,7 +167,7 @@ class TopologicalGraphEncoder:
             try:
                 batch = Batch.from_data_list([d])
                 with torch.no_grad():
-                    e = model(batch.x, batch.edge_index, batch.edge_type, batch.batch)
+                    e = model(batch.x, batch.edge_index, batch.batch)
                 embeddings_list.append(e)
                 valid_idx.append(i)
             except Exception as exc:
@@ -217,9 +193,9 @@ class TopologicalGraphEncoder:
 
         return embeddings, graph_ids
 
-    def save(self, path: str):
+    def export_model(self, path: str):
         """
-        Saves the RGATEncoder weights and relation mapping to disk.
+        Saves the GraphSAGEEncoder weights to disk.
         """
         with self._lock:
             if self.model is None:
@@ -228,9 +204,6 @@ class TopologicalGraphEncoder:
 
             state = {
                 'model_state_dict': self.model.state_dict(),
-                'edge_type_mapping': self.edge_type_mapping,
-                'num_relations': self.num_relations,
-                'max_relations': self.max_relations,
                 'hidden_channels': self.hidden_channels,
                 'out_channels': self.out_channels,
                 'num_node_features': self.num_node_features
@@ -241,9 +214,10 @@ class TopologicalGraphEncoder:
         torch.save(state, path)
         logger.info(f"Saved GNN weights to {path}")
 
-    def load(self, path: str):
+    def load_model_for_inference(self, path: str) -> bool:
         """
-        Loads the RGATEncoder weights and relation mapping from disk.
+        Loads the GraphSAGEEncoder weights explicitly for inference.
+        Enforces eval() mode immediately.
         """
         if not os.path.exists(path):
             logger.warning(f"GNN weights file not found: {path}")
@@ -252,22 +226,20 @@ class TopologicalGraphEncoder:
         try:
             state = torch.load(path)
             with self._lock:
-                self.edge_type_mapping = state['edge_type_mapping']
-                self.num_relations = state['num_relations']
-                self.max_relations = state.get('max_relations', state['num_relations'])
                 self.hidden_channels = state['hidden_channels']
                 self.out_channels = state['out_channels']
                 self.num_node_features = state['num_node_features']
 
                 # Re-initialize model with loaded parameters
-                self.model = RGATEncoder(
+                self.model = GraphSAGEEncoder(
                     in_channels=self.num_node_features,
                     hidden_channels=self.hidden_channels,
-                    out_channels=self.out_channels,
-                    num_relations=max(1, self.max_relations)
+                    out_channels=self.out_channels
                 )
                 self.model.load_state_dict(state['model_state_dict'])
-            logger.info(f"Loaded GNN weights from {path}")
+                # Strict mode enforcement
+                self.model.eval()
+            logger.info(f"Loaded GNN weights for inference from {path}")
             return True
         except Exception as e:
             logger.error(f"Failed to load GNN weights from {path}: {e}")

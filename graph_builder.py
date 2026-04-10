@@ -17,7 +17,9 @@ class GraphBuilder:
     # Mapping to translate categorical data to numeric representations (consistent with encoder)
     node_type_mapping = {'process': 0, 'file': 1, 'ip': 2, 'unknown': 3}
 
-    def __init__(self, host: str = 'localhost', port: int = 9200, index: str = "logs-*", maxsize: int = 25, timeout: int = 30, max_retries: int = 3, log_consumer: Optional[Any] = None):
+    def __init__(self, host: str = None, port: int = None, index: str = "logs-*", maxsize: int = 25, timeout: int = 30, max_retries: int = 3, log_consumer: Optional[Any] = None):
+        host = host or os.getenv('OPENSEARCH_HOST', 'localhost')
+        port = port or int(os.getenv('OPENSEARCH_PORT', '9201'))
         self.host = host
         self.port = port
         self.index = index
@@ -74,6 +76,18 @@ class GraphBuilder:
         Extracts raw logs from a specific time window.
         Optionally EXCLUDES known malicious IDs (for semi-supervised baseline).
         """
+        # Memory Wall Guardrail: Prevent loading more than 48 hours for node-specific queries
+        if filter_id:
+            try:
+                end_dt = date_parser.parse(end_time)
+                start_dt = date_parser.parse(start_time)
+                if (end_dt - start_dt).total_seconds() > 48 * 3600:
+                    logger.warning(f"[Memory Wall] Reducing fetch_logs deep dive window from {(end_dt - start_dt).total_seconds()/3600:.1f}h to max 48h.")
+                    start_dt = end_dt - timedelta(hours=48)
+                    start_time = start_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+            except Exception:
+                pass
+
         must_clauses = [
             {
                 "range": {
@@ -149,6 +163,17 @@ class GraphBuilder:
         Fetches the initial logs for the given filter_id and then recursively queries
         for their parent processes to ensure a fully connected provenance graph.
         """
+        # Memory Wall Guardrail: Force strictly bounded windows
+        try:
+            end_dt = date_parser.parse(end_time)
+            start_dt = date_parser.parse(start_time)
+            if (end_dt - start_dt).total_seconds() > 48 * 3600:
+                logger.warning(f"[Memory Wall] Reducing fetch_logs_with_ancestry window from {(end_dt - start_dt).total_seconds()/3600:.1f}h to 48h.")
+                start_dt = end_dt - timedelta(hours=48)
+                start_time = start_dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+        except Exception:
+            pass
+
         initial_logs = self.fetch_logs(start_time, end_time, filter_id, exclude_ids)
         if not initial_logs:
             return []
@@ -247,8 +272,22 @@ class GraphBuilder:
             query = {
                 "query": {
                     "bool": {
-                        "should": should_clauses,
-                        "minimum_should_match": 1
+                        "must": [
+                            {
+                                "range": {
+                                    "@timestamp": {
+                                        "gt": start_time,
+                                        "lte": end_time
+                                    }
+                                }
+                            },
+                            {
+                                "bool": {
+                                    "should": should_clauses,
+                                    "minimum_should_match": 1
+                                }
+                            }
+                        ]
                     }
                 },
                 "size": 500,
@@ -457,10 +496,13 @@ class GraphBuilder:
             
             if G.has_node(ident):
                 G.nodes[ident].update(n_data)
+                # Propagate event timestamp to node
+                if timestamp:
+                    G.nodes[ident]['timestamp'] = timestamp
                 if G.nodes[ident].get('log_type') == 'shadow':
                     G.nodes[ident]['log_type'] = 'real'
             else:
-                G.add_node(ident, **n_data, log_type='real')
+                G.add_node(ident, **n_data, timestamp=timestamp, log_type='real')
 
         # 2. Add Edges and handle Shadow Parents
         for e_data in parsed.get("edges", []):
@@ -478,9 +520,9 @@ class GraphBuilder:
             
             # Ensure both nodes exist (Handle Shadow Nodes)
             if not G.has_node(src_ident):
-                G.add_node(src_ident, type='process', id=src_orig, log_type='shadow')
+                G.add_node(src_ident, type='process', id=src_orig, timestamp=timestamp, log_type='shadow')
             if not G.has_node(dst_ident):
-                G.add_node(dst_ident, type='process', id=dst_orig, log_type='shadow')
+                G.add_node(dst_ident, type='process', id=dst_orig, timestamp=timestamp, log_type='shadow')
                 
             edge_attrs = {k: v for k, v in e_data.items() if k not in ['src', 'dst', 'timestamp']}
             G.add_edge(
@@ -516,7 +558,7 @@ class GraphBuilder:
                 if parent_ident:
                     if G.has_node(parent_ident):
                         if not G.has_edge(parent_ident, n_id):
-                            G.add_edge(parent_ident, n_id, action='spawn (stitch)', log_type='bridge')
+                            G.add_edge(parent_ident, n_id, action='spawn (stitch)', log_type='bridge', timestamp=log_ts)
                             added_edges += 1
                     elif getattr(self, 'log_consumer', None) and graph_id != "unknown" and ppid:
                         # Disconnected node detected (parent missing). Fetch missing context.
@@ -531,7 +573,7 @@ class GraphBuilder:
                                         self._add_parsed_to_graph(G, m_parsed)
                                 # Try to link again
                                 if G.has_node(parent_ident) and not G.has_edge(parent_ident, n_id):
-                                    G.add_edge(parent_ident, n_id, action='spawn (stitch_fallback)', log_type='bridge')
+                                    G.add_edge(parent_ident, n_id, action='spawn (stitch_fallback)', log_type='bridge', timestamp=log_ts)
                                     added_edges += 1
                         except Exception as e:
                             logger.error(f"Error fetching ancestry for session {graph_id}, ppid {ppid}: {e}")

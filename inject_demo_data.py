@@ -481,16 +481,16 @@ for s in SCENARIOS:
 
 print(f"Injecting {len(log_actions)} rich attack-chain log documents...")
 ok, errors = helpers.bulk(client, log_actions, raise_on_error=False)
-print(f"  ✓ Logs: {ok} indexed, {len(errors)} errors")
+print(f"  [OK] Logs: {ok} indexed, {len(errors)} errors")
 
 print(f"Injecting {len(incident_actions)} incident reports...")
 ok, errors = helpers.bulk(client, incident_actions, raise_on_error=False)
-print(f"  ✓ Incidents: {ok} indexed, {len(errors)} errors")
+print(f"  [OK] Incidents: {ok} indexed, {len(errors)} errors")
 
 print("\nDone! Summary of injected attack chains:")
 for s in SCENARIOS:
     name = s["incident"]["incident_title"].split("]")[0].lstrip("[")
-    print(f"  • {name}: {len(s['logs'])} logs  →  ID: {s['group_id']}")
+    print(f"  - {name}: {len(s['logs'])} logs | ID: {s['group_id']}")
 
 print("\nIn Streamlit:")
 print("  Tab 1 → Incident Feed: 5 DFIR reports with full MITRE/CIA/Remediation")

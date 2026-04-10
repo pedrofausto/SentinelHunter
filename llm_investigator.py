@@ -60,7 +60,7 @@ class LLMInvestigator:
             "{\n"
             "  \"incident_title\": \"[TACTIC] e.g. Domain Controller Persistence via Silver Ticket\",\n"
             "  \"severity\": \"Critical | High | Medium | Low\",\n"
-            "  \"confidence_score\": 0.98,\n"
+            "  \"confidence_score\": 0.0,  // Float [0.0-1.0]: your analytical confidence based strictly on graph evidence quality and indicator strength. Use the full range — low evidence = 0.3-0.5, moderate = 0.5-0.75, high = 0.75-0.90, near-certain = 0.90-0.97. Reserve 0.98+ for unambiguous multi-stage attacks with C2 IOCs.\n"
             "  \"risk_justification\": \"Why is this anomalous?\",\n"
             "  \"summary\": \"Detailed execution narrative.\",\n"
             "  \"impact_assessment\": {\n"
